@@ -82,7 +82,8 @@ _ws_blacklist: Set[Tuple[int, bool]] = set()
 
 # Rate-limit re-attempts per (dc, is_media)
 _dc_fail_until: Dict[Tuple[int, bool], float] = {}
-_DC_FAIL_COOLDOWN = 60.0  # seconds
+_DC_FAIL_COOLDOWN = 30.0   # seconds to keep reduced WS timeout after failure
+_WS_FAIL_TIMEOUT = 2.0    # quick-retry timeout after a recent WS failure
 
 
 _ssl_ctx = ssl.create_default_context()
@@ -910,20 +911,10 @@ async def _handle_client(reader, writer):
                          label, dc, media_tag)
             return
 
-        # -- Cooldown check --
-        fail_until = _dc_fail_until.get(dc_key, 0)
-        if now < fail_until:
-            remaining = fail_until - now
-            log.debug("[%s] DC%d%s WS cooldown (%.0fs) -> TCP",
-                      label, dc, media_tag, remaining)
-            ok = await _tcp_fallback(reader, writer, dst, port, init,
-                                     label, dc=dc, is_media=is_media)
-            if ok:
-                log.info("[%s] DC%d%s TCP fallback closed",
-                         label, dc, media_tag)
-            return
-
         # -- Try WebSocket via direct connection --
+        fail_until = _dc_fail_until.get(dc_key, 0)
+        ws_timeout = _WS_FAIL_TIMEOUT if now < fail_until else 10.0
+
         domains = _ws_domains(dc, is_media)
         target = _dc_opt[dc]
         ws = None
@@ -941,7 +932,7 @@ async def _handle_client(reader, writer):
                          label, dc, media_tag, dst, port, url, target)
                 try:
                     ws = await RawWebSocket.connect(target, domain,
-                                                    timeout=10)
+                                                    timeout=ws_timeout)
                     all_redirects = False
                     break
                 except WsHandshakeError as exc:
